@@ -246,6 +246,47 @@ class Database:
         conn.commit()
         conn.close()
     
+    def delete_questionnaire(self, questionnaire_id: int, admin_id: int) -> bool:
+        """Delete questionnaire and all related data (admin only)"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Check if questionnaire exists and belongs to admin
+            cursor.execute('''
+                SELECT created_by FROM questionnaires WHERE id = ?
+            ''', (questionnaire_id,))
+            result = cursor.fetchone()
+            
+            if not result:
+                return False  # Questionnaire not found
+            
+            if result['created_by'] != admin_id:
+                return False  # Not authorized to delete
+            
+            # Delete in correct order to maintain referential integrity
+            
+            # 1. Delete responses
+            cursor.execute('DELETE FROM responses WHERE questionnaire_id = ?', (questionnaire_id,))
+            
+            # 2. Delete questionnaire responses tracking
+            cursor.execute('DELETE FROM questionnaire_responses WHERE questionnaire_id = ?', (questionnaire_id,))
+            
+            # 3. Delete questions
+            cursor.execute('DELETE FROM questions WHERE questionnaire_id = ?', (questionnaire_id,))
+            
+            # 4. Delete questionnaire
+            cursor.execute('DELETE FROM questionnaires WHERE id = ?', (questionnaire_id,))
+            
+            conn.commit()
+            return True
+            
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            conn.close()
+    
     # Question operations
     def add_question(self, questionnaire_id: int, question_text: str, 
                     question_type: QuestionType, options: List[str] = None, 

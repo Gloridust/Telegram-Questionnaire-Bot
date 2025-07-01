@@ -43,6 +43,7 @@ class QuestionnaireBot:
         self.app.add_handler(CommandHandler("my_questionnaires", self.list_my_questionnaires))
         self.app.add_handler(CommandHandler("view_results", self.view_results))
         self.app.add_handler(CommandHandler("export_results", self.export_results))
+        self.app.add_handler(CommandHandler("delete_questionnaire", self.delete_questionnaire_command))
         
         # Callback handlers
         self.app.add_handler(CallbackQueryHandler(self.handle_callback))
@@ -82,6 +83,7 @@ Use /admin to access the admin control panel where you can:
 • Create new questionnaires
 • Manage existing questionnaires  
 • View results and export data
+• Delete questionnaires permanently
 
 📋 **Need Help?**
 Use /help for detailed instructions."""
@@ -174,6 +176,7 @@ Use /help for more information."""
 • `/my_questionnaires` - View and manage your questionnaires
 • `/view_results` - View response statistics and summaries
 • `/export_results` - Export detailed results to Excel
+• `/delete_questionnaire` - Delete questionnaires permanently
 
 📋 **How to create questionnaires:**
 1. Use `/create_questionnaire` to start
@@ -212,7 +215,8 @@ Use /help for more information."""
             [InlineKeyboardButton("📝 Create Questionnaire", callback_data="admin_create")],
             [InlineKeyboardButton("📋 My Questionnaires", callback_data="admin_list")],
             [InlineKeyboardButton("📊 View Results", callback_data="admin_results")],
-            [InlineKeyboardButton("📤 Export Results", callback_data="admin_export")]
+            [InlineKeyboardButton("📤 Export Results", callback_data="admin_export")],
+            [InlineKeyboardButton("🗑️ Delete Questionnaire", callback_data="admin_delete")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -271,13 +275,16 @@ Use /help for more information."""
             if q.status == QuestionnaireStatus.DRAFT:
                 keyboard.append([InlineKeyboardButton("🚀 Activate", callback_data=f"activate_{q.id}")])
                 keyboard.append([InlineKeyboardButton("🔄 Restart Creation", callback_data=f"restart_creation_{q.id}")])
+                keyboard.append([InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_{q.id}")])
             elif q.status == QuestionnaireStatus.ACTIVE:
                 keyboard.append([InlineKeyboardButton("🔗 Get Link & QR", callback_data=f"get_link_{q.id}")])
                 keyboard.append([InlineKeyboardButton("📊 Results", callback_data=f"results_{q.id}")])
                 keyboard.append([InlineKeyboardButton("🔒 Close", callback_data=f"close_{q.id}")])
+                keyboard.append([InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_{q.id}")])
             else:  # CLOSED
                 keyboard.append([InlineKeyboardButton("📊 Results", callback_data=f"results_{q.id}")])
                 keyboard.append([InlineKeyboardButton("📤 Export", callback_data=f"export_{q.id}")])
+                keyboard.append([InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_{q.id}")])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
@@ -303,6 +310,12 @@ Use /help for more information."""
             await self.handle_export_callback(query, data, user, context)
         elif data.startswith("get_link_"):
             await self.handle_get_link_callback(query, data, user, context)
+        elif data.startswith("delete_"):
+            await self.handle_delete_questionnaire_callback(query, data, user)
+        elif data.startswith("confirm_delete_"):
+            await self.handle_confirm_delete_callback(query, data, user)
+        elif data.startswith("cancel_delete_"):
+            await self.handle_cancel_delete_callback(query, data, user)
         
         # Creation callbacks
         elif data.startswith("cancel_creation"):
@@ -338,6 +351,8 @@ Use /help for more information."""
             await self.view_results_from_callback(query, user)
         elif data == "admin_export":
             await self.export_results_from_callback(query, user)
+        elif data == "admin_delete":
+            await self.delete_questionnaire_from_callback(query, user)
     
     async def create_questionnaire_start_from_callback(self, query, user):
         """Start questionnaire creation from callback"""
@@ -808,6 +823,89 @@ Use /help for more information."""
         
         await query.edit_message_text("📤 Link and QR code sent! Check the message above.")
     
+    async def handle_delete_questionnaire_callback(self, query, data, user):
+        """Handle delete questionnaire callback - show confirmation"""
+        if not Config.is_admin(user.id):
+            await query.edit_message_text("❌ Access denied. Admin privileges required.")
+            return
+        
+        questionnaire_id = int(data.split("_")[-1])
+        questionnaire = self.db.get_questionnaire(questionnaire_id)
+        
+        if not questionnaire:
+            await query.edit_message_text("❌ Questionnaire not found.")
+            return
+        
+        if questionnaire.created_by != user.id:
+            await query.edit_message_text("❌ You can only delete questionnaires you created.")
+            return
+        
+        # Get statistics for confirmation
+        stats = self.db.get_questionnaire_stats(questionnaire_id)
+        questions = self.db.get_questions(questionnaire_id)
+        
+        warning_message = f"⚠️ DELETE CONFIRMATION\n\n"
+        warning_message += f"📋 Questionnaire: {questionnaire.title}\n"
+        warning_message += f"❓ Questions: {len(questions)}\n"
+        warning_message += f"👥 Total Responses: {stats['total_started']}\n"
+        warning_message += f"✅ Completed: {stats['total_completed']}\n\n"
+        warning_message += f"🚨 WARNING: This action cannot be undone!\n"
+        warning_message += f"All questions, responses, and data will be permanently deleted.\n\n"
+        warning_message += f"Are you sure you want to delete this questionnaire?"
+        
+        keyboard = [
+            [InlineKeyboardButton("🗑️ Yes, Delete Forever", callback_data=f"confirm_delete_{questionnaire_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_delete_{questionnaire_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(warning_message, reply_markup=reply_markup)
+    
+    async def handle_confirm_delete_callback(self, query, data, user):
+        """Handle confirmed delete action"""
+        if not Config.is_admin(user.id):
+            await query.edit_message_text("❌ Access denied. Admin privileges required.")
+            return
+        
+        questionnaire_id = int(data.split("_")[-1])
+        questionnaire = self.db.get_questionnaire(questionnaire_id)
+        
+        if not questionnaire:
+            await query.edit_message_text("❌ Questionnaire not found.")
+            return
+        
+        try:
+            # Attempt to delete the questionnaire
+            success = self.db.delete_questionnaire(questionnaire_id, user.id)
+            
+            if success:
+                await query.edit_message_text(
+                    f"✅ Questionnaire Deleted Successfully\n\n"
+                    f"📋 '{questionnaire.title}' has been permanently deleted.\n"
+                    f"All associated questions, responses, and data have been removed.\n\n"
+                    f"Use /my_questionnaires to view your remaining questionnaires."
+                )
+            else:
+                await query.edit_message_text("❌ Failed to delete questionnaire. You may not have permission.")
+                
+        except Exception as e:
+            logger.error(f"Error deleting questionnaire {questionnaire_id}: {e}")
+            await query.edit_message_text("❌ An error occurred while deleting the questionnaire. Please try again.")
+    
+    async def handle_cancel_delete_callback(self, query, data, user):
+        """Handle cancelled delete action"""
+        questionnaire_id = int(data.split("_")[-1])
+        questionnaire = self.db.get_questionnaire(questionnaire_id)
+        
+        if questionnaire:
+            await query.edit_message_text(
+                f"❌ Deletion Cancelled\n\n"
+                f"📋 '{questionnaire.title}' was not deleted.\n"
+                f"Use /my_questionnaires to manage your questionnaires."
+            )
+        else:
+            await query.edit_message_text("❌ Deletion cancelled.")
+    
     async def handle_questionnaire_answering(self, update, context, state, message_text):
         """Handle questionnaire answering process"""
         user = update.effective_user
@@ -901,7 +999,7 @@ Use /help for more information."""
                 del self.user_states[user.id]
                 
                 await update.message.reply_text(
-                    "🎉 **Survey Completed!**\n\n"
+                    "🎉 Survey Completed!\n\n"
                     "Thank you for your participation! 🙏\n\n"
                     "Your responses have been recorded successfully."
                 )
@@ -1111,6 +1209,56 @@ Use /help for more information."""
             return
         
         await update.message.reply_text("Use /admin panel for better interface, or export from /my_questionnaires")
+    
+    async def delete_questionnaire_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Delete questionnaire command (admin only)"""
+        user = update.effective_user
+        
+        if not Config.is_admin(user.id):
+            await update.message.reply_text("❌ Access denied. Admin privileges required.")
+            return
+        
+        questionnaires = self.db.get_questionnaires_by_admin(user.id)
+        
+        if not questionnaires:
+            await update.message.reply_text("📋 You haven't created any questionnaires yet.")
+            return
+        
+        message = "🗑️ Select a questionnaire to delete:\n\n"
+        keyboard = []
+        
+        for q in questionnaires:
+            stats = self.db.get_questionnaire_stats(q.id)
+            status_icon = {'draft': '📝', 'active': '✅', 'closed': '🔒'}.get(q.status.value, '❓')
+            message += f"{status_icon} {q.title} - {stats['total_completed']} responses\n"
+            keyboard.append([InlineKeyboardButton(f"🗑️ {q.title}", callback_data=f"delete_{q.id}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(message, reply_markup=reply_markup)
+    
+    async def delete_questionnaire_from_callback(self, query, user):
+        """Delete questionnaire from admin callback"""
+        if not Config.is_admin(user.id):
+            await query.edit_message_text("❌ Access denied. Admin privileges required.")
+            return
+        
+        questionnaires = self.db.get_questionnaires_by_admin(user.id)
+        
+        if not questionnaires:
+            await query.edit_message_text("📋 You haven't created any questionnaires yet.")
+            return
+        
+        message = "🗑️ Select a questionnaire to delete:\n\n"
+        keyboard = []
+        
+        for q in questionnaires:
+            stats = self.db.get_questionnaire_stats(q.id)
+            status_icon = {'draft': '📝', 'active': '✅', 'closed': '🔒'}.get(q.status.value, '❓')
+            message += f"{status_icon} {q.title} - {stats['total_completed']} responses\n"
+            keyboard.append([InlineKeyboardButton(f"🗑️ {q.title}", callback_data=f"delete_{q.id}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup)
     
     def run(self):
         """Run the bot"""
